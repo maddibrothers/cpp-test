@@ -1,10 +1,10 @@
 #include <SDL2/SDL.h>
-#include <SDL2/SDL_opengles2.h>
+#include <GLES3/gl3.h>
 #include <emscripten.h>
 #include <cmath>
 #include <vector>
 
-// --- 1. EMBEDDED SHADERS (NO EXTERNAL FILES REQUIRED) ---
+// --- 1. EMBEDDED SHADERS (WEBGL 2 / GLES 3.0) ---
 const char* vertexShaderSource = R"(#version 300 es
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
@@ -35,7 +35,7 @@ uniform vec3 uViewPos;
 
 out vec4 FragColor;
 
-// ACES Filmic Tone Mapping for deep, rich cinematic contrast
+// ACES Filmic Tone Mapping for deep, rich contrast
 vec3 ACESFilm(vec3 x) {
     float a = 2.51;
     float b = 0.03;
@@ -50,12 +50,12 @@ void main() {
     vec3 lightDir = normalize(uLightPos - vFragPos);
     vec3 viewDir = normalize(uViewPos - vFragPos);
 
-    // Dual-Tone Ambient (Cool Sky + Dusty Ground)
+    // Dual-Tone Ambient (Cool Sky + Warm Earth)
     vec3 skyColor = vec3(0.25, 0.35, 0.45);
     vec3 groundColor = vec3(0.12, 0.08, 0.06);
     vec3 ambient = mix(groundColor, skyColor, norm.y * 0.5 + 0.5) * 0.5;
 
-    // Direct Sunlight (Harsh noon light with strong falloff)
+    // Direct Noon Sunlight
     float diff = max(dot(norm, lightDir), 0.0);
     vec3 sunColor = vec3(1.0, 0.95, 0.88) * 2.5;
     vec3 diffuse = diff * sunColor;
@@ -72,7 +72,7 @@ void main() {
 }
 )";
 
-// --- 2. ARENA DATA (OBJECTS & WALLS) ---
+// --- 2. ARENA DATA (OBJECTS & BOUNDARIES) ---
 struct BoxObject {
     float x, y, z;
     float sx, sy, sz;
@@ -80,25 +80,27 @@ struct BoxObject {
 };
 
 const std::vector<BoxObject> arenaObjects = {
-    // Floor
+    // Ground Floor
     { 0.0f, -0.1f, 0.0f,  48.0f, 0.2f, 70.0f,  0.78f, 0.79f, 0.81f },
-    // Perimeter Sunk Walls (48m x 70m)
+    
+    // Boundary Walls (48m x 70m)
     { -24.0f, 1.4f,   0.0f,   1.0f, 2.8f, 72.0f,  0.88f, 0.89f, 0.90f },
     {  24.0f, 1.4f,   0.0f,   1.0f, 2.8f, 72.0f,  0.88f, 0.89f, 0.90f },
     {   0.0f, 1.4f, -35.0f,  50.0f, 2.8f,  1.0f,  0.88f, 0.89f, 0.90f },
     {   0.0f, 1.4f,  35.0f,  50.0f, 2.8f,  1.0f,  0.88f, 0.89f, 0.90f },
-    // Tactical Shipping Containers
+    
+    // Shipping Containers
     { -11.0f, 1.3f, -16.0f,   2.44f, 2.6f, 12.0f,  0.49f, 0.17f, 0.14f }, // Red 40ft
     { -11.0f, 3.9f, -16.0f,   2.44f, 2.6f, 12.0f,  0.12f, 0.26f, 0.39f }, // Blue Stacked
     { -12.0f, 1.3f,  -3.0f,   2.44f, 2.6f,  6.0f,  0.16f, 0.32f, 0.25f }, // Green
     {  -9.0f, 1.3f,   7.0f,   2.44f, 2.6f,  6.0f,  0.62f, 0.32f, 0.12f }, // Orange
     { -11.5f, 1.3f,  15.0f,   2.44f, 2.6f, 12.0f,  0.27f, 0.29f, 0.31f }, // Grey 40ft
-    {   0.0f, 1.3f,   0.0f,   2.44f, 2.6f, 12.0f,  0.12f, 0.26f, 0.39f }, // Center Killhouse
-    {  11.0f, 1.3f, -11.0f,   2.44f, 2.6f,  6.0f,  0.62f, 0.32f, 0.12f }, // East Lane
-    {  10.5f, 1.3f,  13.0f,   2.44f, 2.6f,  6.0f,  0.16f, 0.32f, 0.25f }  // East Lane Green
+    {   0.0f, 1.3f,   0.0f,   2.44f, 2.6f, 12.0f,  0.12f, 0.26f, 0.39f }, // Center Container
+    {  11.0f, 1.3f, -11.0f,   2.44f, 2.6f,  6.0f,  0.62f, 0.32f, 0.12f }, // East Orange
+    {  10.5f, 1.3f,  13.0f,   2.44f, 2.6f,  6.0f,  0.16f, 0.32f, 0.25f }  // East Green
 };
 
-// --- 3. MINIMAL 4X4 MATRIX MATH ---
+// --- 3. 4X4 MATRIX MATH ---
 void mat4Identity(float* m) {
     for (int i = 0; i < 16; ++i) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
 }
@@ -115,13 +117,13 @@ void mat4Perspective(float* m, float fovY, float aspect, float zNear, float zFar
 
 void mat4LookAt(float* m, float eyeX, float eyeY, float eyeZ, float targetX, float targetY, float targetZ) {
     float fX = targetX - eyeX, fY = targetY - eyeY, fZ = targetZ - eyeZ;
-    float rF = 1.0f / sqrtf(fX*fX + fY*fY + fZ*fZ);
+    float rF = 1.0f / sqrtf(fX * fX + fY * fY + fZ * fZ);
     fX *= rF; fY *= rF; fZ *= rF;
 
-    float sX = fY * 0.0f - fZ * 1.0f; // Cross with Up(0,1,0)
+    float sX = fY * 0.0f - fZ * 1.0f;
     float sY = 0.0f;
     float sZ = fX * 1.0f - 0.0f;
-    float rS = 1.0f / sqrtf(sX*sX + sZ*sZ);
+    float rS = 1.0f / sqrtf(sX * sX + sZ * sZ);
     sX *= rS; sZ *= rS;
 
     float uX = sZ * fY;
@@ -129,9 +131,9 @@ void mat4LookAt(float* m, float eyeX, float eyeY, float eyeZ, float targetX, flo
     float uZ = -sX * fY;
 
     mat4Identity(m);
-    m[0] = sX;  m[4] = sY;  m[8]  = sZ;  m[12] = -(sX*eyeX + sY*eyeY + sZ*eyeZ);
-    m[1] = uX;  m[5] = uY;  m[9]  = uZ;  m[13] = -(uX*eyeX + uY*eyeY + uZ*eyeZ);
-    m[2] = -fX; m[6] = -fY; m[10] = -fZ; m[14] =  (fX*eyeX + fY*eyeY + fZ*eyeZ);
+    m[0] = sX;  m[4] = sY;  m[8]  = sZ;  m[12] = -(sX * eyeX + sY * eyeY + sZ * eyeZ);
+    m[1] = uX;  m[5] = uY;  m[9]  = uZ;  m[13] = -(uX * eyeX + uY * eyeY + uZ * eyeZ);
+    m[2] = -fX; m[6] = -fY; m[10] = -fZ; m[14] =  (fX * eyeX + fY * eyeY + fZ * eyeZ);
 }
 
 void mat4Model(float* m, float x, float y, float z, float sx, float sy, float sz) {
@@ -140,7 +142,7 @@ void mat4Model(float* m, float x, float y, float z, float sx, float sy, float sz
     m[12] = x; m[13] = y; m[14] = z;
 }
 
-// --- 4. ENGINE GLOBALS & RUNTIME ---
+// --- 4. ENGINE STATE & GLOBALS ---
 SDL_Window* window = nullptr;
 GLuint shaderProgram = 0;
 GLuint cubeVAO = 0, cubeVBO = 0;
@@ -148,7 +150,7 @@ GLint uModelLoc, uViewLoc, uProjLoc, uColorLoc, uLightPosLoc, uViewPosLoc;
 float cameraAngle = 0.0f;
 
 const float cubeVertices[] = {
-    // Front face (Pos, Normal)
+    // Front face
     -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
      0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
      0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,
@@ -193,7 +195,7 @@ const float cubeVertices[] = {
 };
 
 void main_loop() {
-    cameraAngle += 0.005f; // Slow cinematic orbit around the arena
+    cameraAngle += 0.005f;
     float camX = sinf(cameraAngle) * 55.0f;
     float camZ = cosf(cameraAngle) * 55.0f;
     float camY = 32.0f;
@@ -214,7 +216,7 @@ void main_loop() {
     glUniformMatrix4fv(uProjLoc, 1, GL_FALSE, proj);
     glUniformMatrix4fv(uViewLoc, 1, GL_FALSE, view);
     glUniform3f(uViewPosLoc, camX, camY, camZ);
-    glUniform3f(uLightPosLoc, -36.0f, 17.0f, 24.0f); // Fixed harsh noon directional sun
+    glUniform3f(uLightPosLoc, -36.0f, 17.0f, 24.0f);
 
     glBindVertexArray(cubeVAO);
 
@@ -238,7 +240,6 @@ int main() {
 
     glEnable(GL_DEPTH_TEST);
 
-    // Compile Shaders
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vertexShaderSource, nullptr);
     glCompileShader(vs);
@@ -259,7 +260,6 @@ int main() {
     uLightPosLoc = glGetUniformLocation(shaderProgram, "uLightPos");
     uViewPosLoc = glGetUniformLocation(shaderProgram, "uViewPos");
 
-    // Upload Mesh Geometry
     glGenVertexArrays(1, &cubeVAO);
     glGenBuffers(1, &cubeVBO);
     glBindVertexArray(cubeVAO);
