@@ -6,7 +6,7 @@
 #include <vector>
 
 // ============================================================================
-// 1. PROCEDURAL PBR SHADER (CORRUGATED STEEL, PLANKS, SLABS & SHADOWS)
+// 1. AAA SHADER (SKY DOME, LONG SHADOWS, PBR & ASPHALT NITRO COLOR GRADE)
 // ============================================================================
 const char* vertexShaderSource = R"(#version 300 es
 layout (location = 0) in vec3 aPos;
@@ -15,6 +15,8 @@ layout (location = 1) in vec3 aNormal;
 uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProj;
+uniform vec3 uLightDir;
+uniform int  uIsShadow;
 
 out vec3 vNormal;
 out vec3 vFragPos;
@@ -22,9 +24,22 @@ out vec3 vLocalPos;
 
 void main() {
     vLocalPos = aPos;
-    vFragPos = vec3(uModel * vec4(aPos, 1.0));
-    vNormal = mat3(transpose(inverse(uModel))) * aNormal;
-    gl_Position = uProj * uView * vec4(vFragPos, 1.0);
+
+    if (uIsShadow == 1) {
+        // Planar Long Shadow Projection: casts vertices onto the Y = 0.005 tarmac plane
+        vec4 worldPos = uModel * vec4(aPos, 1.0);
+        float t = (worldPos.y - 0.005) / (-uLightDir.y);
+        worldPos.x += uLightDir.x * t;
+        worldPos.z += uLightDir.z * t;
+        worldPos.y = 0.005;
+        vFragPos = worldPos.xyz;
+        vNormal = vec3(0.0, 1.0, 0.0);
+        gl_Position = uProj * uView * worldPos;
+    } else {
+        vFragPos = vec3(uModel * vec4(aPos, 1.0));
+        vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+        gl_Position = uProj * uView * vec4(vFragPos, 1.0);
+    }
 }
 )";
 
@@ -36,9 +51,10 @@ in vec3 vFragPos;
 in vec3 vLocalPos;
 
 uniform vec3 uColor;
-uniform vec3 uLightPos;
+uniform vec3 uLightDir;
 uniform vec3 uViewPos;
-uniform int  uMatType; // 0=Ground/Asphalt, 1=Container (Ribbed), 2=Crate (Planks), 3=Wall/Barrier
+uniform int  uMatType;  // 0=Asphalt Road, 1=Container, 2=Crate, 3=Kerb/Barrier, 4=Sky
+uniform int  uIsShadow; // 1=Cast Shadow pass
 
 out vec4 FragColor;
 
@@ -48,7 +64,7 @@ float hash(vec2 p) {
     return fract(p.x * p.y);
 }
 
-// ACES Filmic Tone Mapping for deep contrast and filmic saturation
+// ACES Filmic Tone Mapping Curve
 vec3 ACESFilm(vec3 x) {
     float a = 2.51;
     float b = 0.03;
@@ -59,33 +75,89 @@ vec3 ACESFilm(vec3 x) {
 }
 
 void main() {
-    vec3 N = normalize(vNormal);
-    vec3 lightDir = normalize(uLightPos - vFragPos);
-    vec3 viewDir = normalize(uViewPos - vFragPos);
+    // ------------------------------------------------------------------------
+    // SHADOW PASS: CRISP, DARK DIRECTIONAL SHADOW ON TARMAC
+    // ------------------------------------------------------------------------
+    if (uIsShadow == 1) {
+        FragColor = vec4(0.04, 0.06, 0.10, 0.68);
+        return;
+    }
 
-    vec3 albedo = uColor;
-    float roughness = 0.65;
-    float metallic = 0.1;
-    float ao = 1.0;
+    // ------------------------------------------------------------------------
+    // MATERIAL 4: VIBRANT ASPHALT NITRO SKY DOME (SUN & FLUFFY CLOUDS)
+    // ------------------------------------------------------------------------
+    if (uMatType == 4) {
+        vec3 dir = normalize(vLocalPos);
+        float h = clamp(dir.y * 1.8 + 0.05, 0.0, 1.0);
 
-    // --- MATERIAL 0: CONCRETE FLOOR & ASPHALT ROAD ---
-    if (uMatType == 0) {
-        vec2 grid = abs(fract(vFragPos.xz * 0.166) - 0.5);
-        float seam = smoothstep(0.46, 0.50, max(grid.x, grid.y));
-        albedo = mix(albedo, vec3(0.18, 0.18, 0.20), seam * 0.85);
+        // Electric Alpine Sky Gradient
+        vec3 zenith  = vec3(0.04, 0.44, 0.96); // Punchy deep blue
+        vec3 horizon = vec3(0.62, 0.86, 1.00); // Bright cyan horizon
+        vec3 sky = mix(horizon, zenith, pow(h, 0.65));
 
-        float grain = hash(floor(vFragPos.xz * 35.0)) * 0.12;
-        albedo += vec3(grain - 0.06);
+        // Blazing Directional Sun Disc & Corona Glow
+        vec3 sunDir = normalize(-uLightDir);
+        float sunDot = max(dot(dir, sunDir), 0.0);
+        sky += vec3(1.0, 0.96, 0.80) * pow(sunDot, 220.0) * 3.0; // Sun Core
+        sky += vec3(1.0, 0.82, 0.45) * pow(sunDot, 14.0) * 0.65; // Corona Bloom
 
-        if (abs(vFragPos.x) < 0.28 && abs(vFragPos.z) < 26.0) {
-            float dash = step(0.4, fract(vFragPos.z * 0.4));
-            albedo = mix(albedo, vec3(0.95, 0.72, 0.10), dash * 0.9);
+        // Procedural Stylized White Clouds
+        if (dir.y > 0.02) {
+            vec2 cuv = dir.xz / (dir.y + 0.22) * 1.5;
+            float c = sin(cuv.x * 2.2) * cos(cuv.y * 2.2) + hash(floor(cuv * 2.5)) * 0.45;
+            float cloud = smoothstep(0.25, 0.75, c);
+            sky = mix(sky, vec3(1.0, 1.0, 1.0), cloud * clamp(dir.y * 3.5, 0.0, 0.92));
         }
 
-        ao = clamp((vFragPos.y + 0.15) * 4.0, 0.45, 1.0);
-        roughness = 0.88;
+        FragColor = vec4(sky, 1.0);
+        return;
     }
-    // --- MATERIAL 1: CORRUGATED SHIPPING CONTAINERS ---
+
+    vec3 N = normalize(vNormal);
+    vec3 lightDir = normalize(-uLightDir);
+    vec3 viewDir  = normalize(uViewPos - vFragPos);
+
+    vec3 albedo = uColor;
+    float roughness = 0.55;
+    float metallic  = 0.15;
+    float ao = 1.0;
+
+    // ------------------------------------------------------------------------
+    // MATERIAL 0: DARK RACING ASPHALT & ROAD MARKINGS
+    // ------------------------------------------------------------------------
+    if (uMatType == 0) {
+        // Dark Asphalt base
+        albedo = vec3(0.18, 0.20, 0.22);
+
+        // Asphalt Grain
+        float grain = hash(floor(vFragPos.xz * 40.0)) * 0.08;
+        albedo += vec3(grain - 0.04);
+
+        // Slabs & Seams
+        vec2 grid = abs(fract(vFragPos.xz * 0.166) - 0.5);
+        float seam = smoothstep(0.47, 0.50, max(grid.x, grid.y));
+        albedo = mix(albedo, vec3(0.10, 0.11, 0.12), seam * 0.7);
+
+        // Vibrant Yellow Center Double Lines
+        if (abs(vFragPos.x) < 0.65 && abs(vFragPos.z) < 28.0) {
+            float lineOffset = abs(vFragPos.x);
+            if (lineOffset > 0.15 && lineOffset < 0.45) {
+                albedo = vec3(1.0, 0.76, 0.04); // Vibrant Racing Yellow
+                roughness = 0.45;
+            }
+        }
+
+        // White Shoulder Markings
+        if (abs(vFragPos.x) > 21.0 && abs(vFragPos.x) < 21.6 && abs(vFragPos.z) < 32.0) {
+            albedo = vec3(0.95, 0.95, 0.95);
+        }
+
+        ao = clamp((vFragPos.y + 0.2) * 5.0, 0.55, 1.0);
+        roughness = 0.85;
+    }
+    // ------------------------------------------------------------------------
+    // MATERIAL 1: CORRUGATED STEEL SHIPPING CONTAINERS
+    // ------------------------------------------------------------------------
     else if (uMatType == 1) {
         if (abs(N.y) < 0.4) {
             float ribCoord = (abs(N.x) > 0.5) ? vFragPos.z : vFragPos.x;
@@ -93,74 +165,91 @@ void main() {
 
             vec3 ribNormalPerturb = vec3(0.0);
             if (abs(N.x) > 0.5) {
-                ribNormalPerturb = vec3(0.0, 0.0, cos(ribCoord * 14.0) * 0.75);
+                ribNormalPerturb = vec3(0.0, 0.0, cos(ribCoord * 14.0) * 0.85);
             } else {
-                ribNormalPerturb = vec3(cos(ribCoord * 14.0) * 0.75, 0.0, 0.0);
+                ribNormalPerturb = vec3(cos(ribCoord * 14.0) * 0.85, 0.0, 0.0);
             }
             N = normalize(N + ribNormalPerturb);
 
-            float ribShadow = smoothstep(-0.8, 0.4, rib);
-            albedo *= mix(0.55, 1.15, ribShadow);
+            float ribShadow = smoothstep(-0.85, 0.35, rib);
+            albedo *= mix(0.55, 1.18, ribShadow);
 
-            float groundDirt = clamp(vFragPos.y / 1.2, 0.0, 1.0);
-            albedo = mix(vec3(0.18, 0.14, 0.10), albedo, smoothstep(0.0, 0.85, groundDirt));
-        } else {
-            float roofRib = sin(vFragPos.z * 10.0);
-            albedo *= (0.8 + 0.2 * step(0.0, roofRib));
+            float groundDirt = clamp(vFragPos.y / 1.3, 0.0, 1.0);
+            albedo = mix(vec3(0.14, 0.10, 0.07), albedo, smoothstep(0.0, 0.85, groundDirt));
         }
-
-        ao = clamp(vFragPos.y * 1.5, 0.55, 1.0);
-        metallic = 0.45;
-        roughness = 0.40;
+        ao = clamp(vFragPos.y * 1.6, 0.55, 1.0);
+        metallic = 0.50;
+        roughness = 0.35;
     }
-    // --- MATERIAL 2: WOODEN CRATES WITH METAL BRACKETS ---
+    // ------------------------------------------------------------------------
+    // MATERIAL 2: WOODEN CRATES WITH CORNER BRACKETS
+    // ------------------------------------------------------------------------
     else if (uMatType == 2) {
         vec3 p = abs(vLocalPos);
         bool isCorner = (p.x > 0.42 && p.y > 0.42) || (p.x > 0.42 && p.z > 0.42) || (p.y > 0.42 && p.z > 0.42);
-
         if (isCorner) {
-            albedo = vec3(0.22, 0.23, 0.25);
-            metallic = 0.6;
-            roughness = 0.35;
+            albedo = vec3(0.18, 0.19, 0.22);
+            metallic = 0.7;
+            roughness = 0.30;
         } else {
             float plank = fract(vLocalPos.y * 5.0);
             float seam = smoothstep(0.0, 0.08, plank) * smoothstep(1.0, 0.92, plank);
-            albedo *= mix(0.65, 1.08, seam);
-            roughness = 0.82;
+            albedo *= mix(0.65, 1.12, seam);
+            roughness = 0.80;
         }
     }
-    // --- MATERIAL 3: PERIMETER WALLS & BARRIERS ---
+    // ------------------------------------------------------------------------
+    // MATERIAL 3: RACING KERBS & BARRIERS (RED/WHITE STRIPES)
+    // ------------------------------------------------------------------------
     else if (uMatType == 3) {
-        float concreteGrain = hash(floor(vFragPos.xy * 8.0)) * 0.15;
-        albedo += vec3(concreteGrain - 0.075);
-        ao = clamp(vFragPos.y / 2.0, 0.6, 1.0);
-        roughness = 0.92;
+        float stripe = step(0.5, fract(vFragPos.z * 0.4));
+        vec3 redStripe   = vec3(0.88, 0.14, 0.12);
+        vec3 whiteStripe = vec3(0.92, 0.92, 0.95);
+        albedo = mix(redStripe, whiteStripe, stripe);
+        roughness = 0.50;
     }
 
-    // --- PBR LIGHTING ENGINE ---
-    vec3 skyLight = vec3(0.22, 0.30, 0.42);
-    vec3 groundBounce = vec3(0.14, 0.09, 0.06);
-    vec3 ambient = mix(groundBounce, skyLight, N.y * 0.5 + 0.5) * 0.70 * ao;
+    // ------------------------------------------------------------------------
+    // LIGHTING: DUAL-TONE AMBIENT + HARSH SUN + SPECULAR HIGHLIGHTS
+    // ------------------------------------------------------------------------
+    vec3 skyLight     = vec3(0.18, 0.42, 0.78); // Cool blue sky bounce
+    vec3 groundBounce = vec3(0.12, 0.08, 0.06); // Warm dirt bounce
+    vec3 ambient = mix(groundBounce, skyLight, N.y * 0.5 + 0.5) * 0.65 * ao;
 
+    // Harsh Sunlight
     float NdotL = max(dot(N, lightDir), 0.0);
-    vec3 sunColor = vec3(1.0, 0.96, 0.90) * 2.8;
+    vec3 sunColor = vec3(1.0, 0.97, 0.90) * 3.1;
     vec3 diffuse = NdotL * sunColor;
 
+    // Crisp Specular Glare
     vec3 halfDir = normalize(lightDir + viewDir);
-    float specFactor = pow(max(dot(N, halfDir), 0.0), mix(64.0, 8.0, roughness));
-    vec3 specColor = mix(vec3(0.04), albedo, metallic);
-    vec3 specular = specColor * specFactor * (1.0 - roughness);
+    float specFactor = pow(max(dot(N, halfDir), 0.0), mix(72.0, 10.0, roughness));
+    vec3 specColor = mix(vec3(0.05), albedo, metallic);
+    vec3 specular = specColor * specFactor * (1.0 - roughness) * 1.5;
 
-    vec3 directLight = (diffuse + specular);
-    vec3 linearColor = (ambient * albedo) + (directLight * albedo);
+    vec3 linearColor = (ambient * albedo) + ((diffuse + specular) * albedo);
 
-    vec3 finalColor = pow(ACESFilm(linearColor), vec3(1.0 / 2.2));
-    FragColor = vec4(finalColor, 1.0);
+    // ------------------------------------------------------------------------
+    // POST-PROCESSING COLOR GRADE (ASPHALT NITRO HIGH-SATURATION FILTER)
+    // ------------------------------------------------------------------------
+    vec3 graded = ACESFilm(linearColor);
+
+    // Saturation Boost (+42% saturation for vivid arcade look)
+    float luma = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+    graded = mix(vec3(luma), graded, 1.42);
+
+    // Contrast S-Curve for deeper darks
+    graded = smoothstep(0.01, 0.99, graded);
+
+    // Gamma correction
+    graded = pow(graded, vec3(1.0 / 2.2));
+
+    FragColor = vec4(graded, 1.0);
 }
 )";
 
 // ============================================================================
-// 2. ARENA OBJECT LAYOUT
+// 2. ARENA DATA CONFIGURATION
 // ============================================================================
 struct MapObject {
     float x, y, z;
@@ -170,40 +259,40 @@ struct MapObject {
 };
 
 const std::vector<MapObject> arenaObjects = {
-    // Ground Floor
-    { 0.0f, -0.1f, 0.0f,  48.0f, 0.2f, 70.0f,  0.45f, 0.46f, 0.48f, 0 },
+    // Dark Asphalt Arena Floor
+    { 0.0f, -0.1f, 0.0f,  48.0f, 0.2f, 70.0f,  0.20f, 0.22f, 0.24f, 0 },
 
-    // Boundary Concrete Walls
-    { -24.0f, 1.4f,   0.0f,   1.0f, 2.8f, 72.0f,  0.82f, 0.83f, 0.85f, 3 },
-    {  24.0f, 1.4f,   0.0f,   1.0f, 2.8f, 72.0f,  0.82f, 0.83f, 0.85f, 3 },
-    {   0.0f, 1.4f, -35.0f,  50.0f, 2.8f,  1.0f,  0.82f, 0.83f, 0.85f, 3 },
-    {   0.0f, 1.4f,  35.0f,  50.0f, 2.8f,  1.0f,  0.82f, 0.83f, 0.85f, 3 },
+    // Racing Kerb Concrete Boundaries
+    { -24.0f, 1.4f,   0.0f,   1.0f, 2.8f, 72.0f,  0.85f, 0.85f, 0.85f, 3 },
+    {  24.0f, 1.4f,   0.0f,   1.0f, 2.8f, 72.0f,  0.85f, 0.85f, 0.85f, 3 },
+    {   0.0f, 1.4f, -35.0f,  50.0f, 2.8f,  1.0f,  0.85f, 0.85f, 0.85f, 3 },
+    {   0.0f, 1.4f,  35.0f,  50.0f, 2.8f,  1.0f,  0.85f, 0.85f, 0.85f, 3 },
 
-    // Shipping Containers
-    { -11.0f, 1.3f, -16.0f,   2.44f, 2.6f, 12.0f,  0.72f, 0.16f, 0.12f, 1 }, // Red 40ft
-    { -11.0f, 3.9f, -16.0f,   2.44f, 2.6f, 12.0f,  0.10f, 0.32f, 0.58f, 1 }, // Navy Stacked
-    { -12.0f, 1.3f,  -3.0f,   2.44f, 2.6f,  6.0f,  0.14f, 0.42f, 0.28f, 1 }, // Tactical Green
-    {  -9.0f, 1.3f,   7.0f,   2.44f, 2.6f,  6.0f,  0.85f, 0.42f, 0.10f, 1 }, // Industrial Orange
-    { -11.5f, 1.3f,  15.0f,   2.44f, 2.6f, 12.0f,  0.35f, 0.37f, 0.40f, 1 }, // Dark Grey 40ft
-    {   0.0f, 1.3f,   0.0f,   2.44f, 2.6f, 12.0f,  0.10f, 0.32f, 0.58f, 1 }, // Center Blue
-    {  11.0f, 1.3f, -11.0f,   2.44f, 2.6f,  6.0f,  0.85f, 0.42f, 0.10f, 1 }, // East Orange
-    {  10.5f, 1.3f,  13.0f,   2.44f, 2.6f,  6.0f,  0.14f, 0.42f, 0.28f, 1 }, // East Green
+    // Vibrant Glossy Containers (Punchy Red, Electric Blue, Bright Gold, Toxic Green)
+    { -11.0f, 1.3f, -16.0f,   2.44f, 2.6f, 12.0f,  0.88f, 0.12f, 0.10f, 1 }, // Racing Red 40ft
+    { -11.0f, 3.9f, -16.0f,   2.44f, 2.6f, 12.0f,  0.08f, 0.44f, 0.95f, 1 }, // Electric Blue Stacked
+    { -12.0f, 1.3f,  -3.0f,   2.44f, 2.6f,  6.0f,  0.10f, 0.65f, 0.32f, 1 }, // Toxic Green
+    {  -9.0f, 1.3f,   7.0f,   2.44f, 2.6f,  6.0f,  0.98f, 0.52f, 0.04f, 1 }, // Flame Orange
+    { -11.5f, 1.3f,  15.0f,   2.44f, 2.6f, 12.0f,  0.42f, 0.45f, 0.50f, 1 }, // Gunmetal Grey 40ft
+    {   0.0f, 1.3f,   0.0f,   2.44f, 2.6f, 12.0f,  0.08f, 0.44f, 0.95f, 1 }, // Center Killhouse Blue
+    {  11.0f, 1.3f, -11.0f,   2.44f, 2.6f,  6.0f,  0.98f, 0.52f, 0.04f, 1 }, // East Flame Orange
+    {  10.5f, 1.3f,  13.0f,   2.44f, 2.6f,  6.0f,  0.10f, 0.65f, 0.32f, 1 }, // East Green
 
-    // Military Wooden Crates
-    {  7.5f, 0.7f, -14.0f,   1.4f, 1.4f, 1.4f,    0.58f, 0.42f, 0.26f, 2 },
-    {  8.9f, 0.7f, -14.4f,   1.4f, 1.4f, 1.4f,    0.58f, 0.42f, 0.26f, 2 },
-    {  8.2f, 2.1f, -14.2f,   1.4f, 1.4f, 1.4f,    0.58f, 0.42f, 0.26f, 2 },
-    { -5.0f, 0.7f,  12.0f,   1.4f, 1.4f, 1.4f,    0.58f, 0.42f, 0.26f, 2 },
+    // Wooden Crates
+    {  7.5f, 0.7f, -14.0f,   1.4f, 1.4f, 1.4f,    0.68f, 0.44f, 0.22f, 2 },
+    {  8.9f, 0.7f, -14.4f,   1.4f, 1.4f, 1.4f,    0.68f, 0.44f, 0.22f, 2 },
+    {  8.2f, 2.1f, -14.2f,   1.4f, 1.4f, 1.4f,    0.68f, 0.44f, 0.22f, 2 },
+    { -5.0f, 0.7f,  12.0f,   1.4f, 1.4f, 1.4f,    0.68f, 0.44f, 0.22f, 2 },
 
-    // Concrete Jersey Barriers
-    { -5.5f, 0.57f,  18.0f,   0.7f, 1.15f, 3.6f,  0.68f, 0.67f, 0.65f, 3 },
-    {  5.5f, 0.57f,  18.0f,   0.7f, 1.15f, 3.6f,  0.68f, 0.67f, 0.65f, 3 },
-    { -5.5f, 0.57f, -18.0f,   0.7f, 1.15f, 3.6f,  0.68f, 0.67f, 0.65f, 3 },
-    {  5.5f, 0.57f, -18.0f,   0.7f, 1.15f, 3.6f,  0.68f, 0.67f, 0.65f, 3 }
+    // Striped Barriers
+    { -5.5f, 0.57f,  18.0f,   0.7f, 1.15f, 3.6f,  0.85f, 0.85f, 0.85f, 3 },
+    {  5.5f, 0.57f,  18.0f,   0.7f, 1.15f, 3.6f,  0.85f, 0.85f, 0.85f, 3 },
+    { -5.5f, 0.57f, -18.0f,   0.7f, 1.15f, 3.6f,  0.85f, 0.85f, 0.85f, 3 },
+    {  5.5f, 0.57f, -18.0f,   0.7f, 1.15f, 3.6f,  0.85f, 0.85f, 0.85f, 3 }
 };
 
 // ============================================================================
-// 3. CORRECT COLUMN-MAJOR 3D MATRIX MATH
+// 3. MATRIX MATH
 // ============================================================================
 void mat4Identity(float* m) {
     for (int i = 0; i < 16; ++i) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
@@ -219,20 +308,17 @@ void mat4Perspective(float* m, float fovY, float aspect, float zNear, float zFar
     m[14] = (2.0f * zFar * zNear) / (zNear - zFar);
 }
 
-// Correct Right-Handed LookAt: Right = F x Up, Up = Right x F
 void mat4LookAt(float* m, float eyeX, float eyeY, float eyeZ, float targetX, float targetY, float targetZ) {
     float fX = targetX - eyeX, fY = targetY - eyeY, fZ = targetZ - eyeZ;
     float rF = 1.0f / sqrtf(fX * fX + fY * fY + fZ * fZ);
     fX *= rF; fY *= rF; fZ *= rF;
 
-    // Right = normalize(F x (0,1,0)) -> (-fZ, 0, fX)
     float sX = -fZ;
     float sY = 0.0f;
     float sZ = fX;
     float rS = 1.0f / sqrtf(sX * sX + sZ * sZ);
     sX *= rS; sZ *= rS;
 
-    // Up = s x f
     float uX = -sZ * fY;
     float uY = sZ * fX - sX * fZ;
     float uZ = sX * fY;
@@ -251,7 +337,7 @@ void mat4Model(float* m, float x, float y, float z, float sx, float sy, float sz
 }
 
 // ============================================================================
-// 4. INTERACTIVE ORBIT CAMERA CONTROLS (TOUCH & MOUSE)
+// 4. TOUCH ORBIT CONTROLS
 // ============================================================================
 float camYaw = 0.85f;
 float camPitch = 0.52f;
@@ -285,7 +371,6 @@ EM_BOOL on_touch_move(int eventType, const EmscriptenTouchEvent *e, void *userDa
         camYaw   -= dx * 0.007f;
         camPitch += dy * 0.007f;
 
-        // Clamp elevation so camera stays upright and never flips
         if (camPitch < 0.08f) camPitch = 0.08f;
         if (camPitch > 1.45f) camPitch = 1.45f;
 
@@ -312,12 +397,12 @@ EM_BOOL on_touch_end(int eventType, const EmscriptenTouchEvent *e, void *userDat
 }
 
 // ============================================================================
-// 5. ENGINE STATE & MAIN LOOP
+// 5. ENGINE STATE & RENDER PIPELINE
 // ============================================================================
 SDL_Window* window = nullptr;
 GLuint shaderProgram = 0;
 GLuint cubeVAO = 0, cubeVBO = 0;
-GLint uModelLoc, uViewLoc, uProjLoc, uColorLoc, uLightPosLoc, uViewPosLoc, uMatTypeLoc;
+GLint uModelLoc, uViewLoc, uProjLoc, uColorLoc, uLightDirLoc, uViewPosLoc, uMatTypeLoc, uIsShadowLoc;
 
 const float cubeVertices[] = {
     // Front face
@@ -365,7 +450,6 @@ const float cubeVertices[] = {
 };
 
 void main_loop() {
-    // Process Mouse events for desktop browsers
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_MOUSEBUTTONDOWN && ev.button.button == SDL_BUTTON_LEFT) {
@@ -386,7 +470,6 @@ void main_loop() {
         }
     }
 
-    // Auto-sync canvas resolution to mobile viewport
     double cssWidth, cssHeight;
     emscripten_get_element_css_size("#canvas", &cssWidth, &cssHeight);
     int width = (int)cssWidth;
@@ -396,30 +479,76 @@ void main_loop() {
     emscripten_set_canvas_element_size("#canvas", width, height);
     glViewport(0, 0, width, height);
 
-    // Deep tactical atmosphere clear
-    glClearColor(0.08f, 0.11f, 0.15f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glUseProgram(shaderProgram);
 
-    // Spherical Orbit calculation
+    // Orbit Camera View
     float eyeX = sinf(camYaw) * cosf(camPitch) * camDist;
     float eyeY = 1.2f + sinf(camPitch) * camDist;
     float eyeZ = cosf(camYaw) * cosf(camPitch) * camDist;
 
     float proj[16], view[16], model[16];
     float aspect = (float)width / (float)height;
-    mat4Perspective(proj, 50.0f * (M_PI / 180.0f), aspect, 0.2f, 350.0f);
+    mat4Perspective(proj, 50.0f * (M_PI / 180.0f), aspect, 0.2f, 450.0f);
     mat4LookAt(view, eyeX, eyeY, eyeZ, 0.0f, 1.2f, 0.0f);
 
     glUniformMatrix4fv(uProjLoc, 1, GL_FALSE, proj);
     glUniformMatrix4fv(uViewLoc, 1, GL_FALSE, view);
     glUniform3f(uViewPosLoc, eyeX, eyeY, eyeZ);
-    glUniform3f(uLightPosLoc, -34.0f, 24.0f, 26.0f);
+
+    // Sun Angle: Lowered Y to -0.65 to create dramatic, long shadows across the floor
+    float sunDirX = 0.72f, sunDirY = -0.62f, sunDirZ = -0.32f;
+    float sunLen = sqrtf(sunDirX*sunDirX + sunDirY*sunDirY + sunDirZ*sunDirZ);
+    glUniform3f(uLightDirLoc, sunDirX/sunLen, sunDirY/sunLen, sunDirZ/sunLen);
 
     glBindVertexArray(cubeVAO);
 
-    for (const auto& obj : arenaObjects) {
+    // ------------------------------------------------------------------------
+    // PASS 1: RENDER VIBRANT SKY DOME (NO DEPTH WRITE)
+    // ------------------------------------------------------------------------
+    glDepthMask(GL_FALSE);
+    glUniform1i(uIsShadowLoc, 0);
+    glUniform1i(uMatTypeLoc, 4); // Sky
+    mat4Model(model, eyeX, eyeY, eyeZ, 350.0f, 350.0f, 350.0f);
+    glUniformMatrix4fv(uModelLoc, 1, GL_FALSE, model);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glDepthMask(GL_TRUE);
+
+    // ------------------------------------------------------------------------
+    // PASS 2: RENDER GROUND / TARMAC (MATERIAL 0)
+    // ------------------------------------------------------------------------
+    const auto& ground = arenaObjects[0];
+    mat4Model(model, ground.x, ground.y, ground.z, ground.sx, ground.sy, ground.sz);
+    glUniformMatrix4fv(uModelLoc, 1, GL_FALSE, model);
+    glUniform3f(uColorLoc, ground.r, ground.g, ground.b);
+    glUniform1i(uMatTypeLoc, ground.matType);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+
+    // ------------------------------------------------------------------------
+    // PASS 3: LONG DIRECTIONAL PROJECTED SHADOW PASS (ON TARMAC)
+    // ------------------------------------------------------------------------
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glUniform1i(uIsShadowLoc, 1);
+
+    for (size_t i = 1; i < arenaObjects.size(); ++i) {
+        const auto& obj = arenaObjects[i];
+        mat4Model(model, obj.x, obj.y, obj.z, obj.sx, obj.sy, obj.sz);
+        glUniformMatrix4fv(uModelLoc, 1, GL_FALSE, model);
+        glDrawArrays(GL_TRIANGLES, 0, 36);
+    }
+
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glUniform1i(uIsShadowLoc, 0);
+
+    // ------------------------------------------------------------------------
+    // PASS 4: RENDER ALL SOLID ARENA OBJECTS (CONTAINERS, CRATES, KERBS)
+    // ------------------------------------------------------------------------
+    for (size_t i = 1; i < arenaObjects.size(); ++i) {
+        const auto& obj = arenaObjects[i];
         mat4Model(model, obj.x, obj.y, obj.z, obj.sx, obj.sy, obj.sz);
         glUniformMatrix4fv(uModelLoc, 1, GL_FALSE, model);
         glUniform3f(uColorLoc, obj.r, obj.g, obj.b);
@@ -440,7 +569,6 @@ int main() {
 
     glEnable(GL_DEPTH_TEST);
 
-    // Register mobile touch listeners
     emscripten_set_touchstart_callback("#canvas", nullptr, EM_TRUE, on_touch_start);
     emscripten_set_touchmove_callback("#canvas", nullptr, EM_TRUE, on_touch_move);
     emscripten_set_touchend_callback("#canvas", nullptr, EM_TRUE, on_touch_end);
@@ -459,13 +587,14 @@ int main() {
     glAttachShader(shaderProgram, fs);
     glLinkProgram(shaderProgram);
 
-    uModelLoc   = glGetUniformLocation(shaderProgram, "uModel");
-    uViewLoc    = glGetUniformLocation(shaderProgram, "uView");
-    uProjLoc    = glGetUniformLocation(shaderProgram, "uProj");
-    uColorLoc   = glGetUniformLocation(shaderProgram, "uColor");
-    uLightPosLoc= glGetUniformLocation(shaderProgram, "uLightPos");
-    uViewPosLoc = glGetUniformLocation(shaderProgram, "uViewPos");
-    uMatTypeLoc = glGetUniformLocation(shaderProgram, "uMatType");
+    uModelLoc    = glGetUniformLocation(shaderProgram, "uModel");
+    uViewLoc     = glGetUniformLocation(shaderProgram, "uView");
+    uProjLoc     = glGetUniformLocation(shaderProgram, "uProj");
+    uColorLoc    = glGetUniformLocation(shaderProgram, "uColor");
+    uLightDirLoc = glGetUniformLocation(shaderProgram, "uLightDir");
+    uViewPosLoc  = glGetUniformLocation(shaderProgram, "uViewPos");
+    uMatTypeLoc  = glGetUniformLocation(shaderProgram, "uMatType");
+    uIsShadowLoc = glGetUniformLocation(shaderProgram, "uIsShadow");
 
     glGenVertexArrays(1, &cubeVAO);
     glGenBuffers(1, &cubeVBO);
